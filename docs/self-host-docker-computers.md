@@ -32,6 +32,25 @@ browsers otherwise start only when needed. `0`, the default, leaves each to the 
 The supervisor reaches Docker at `/var/run/docker.sock` (or `//./pipe/docker_engine` on Windows). Set
 `DOCKER_SOCKET` for rootless Docker, Colima or another path; `DOCKER_HOST` wins when both are set.
 
+## Memory pressure
+
+Computer starts follow the machine's memory pressure. While memory is calm, up to
+`SANDBOX_MAX_PARALLEL_COMPUTER_STARTS` computers start at once. Once it is busy they start one at a
+time, and once it is full new starts wait in arrival order until memory frees up. Running computers
+are never paused or stopped. A start that waits longer than `SANDBOX_MEMORY_WAIT_MS` fails, and the
+bot can try again.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANDBOX_MEMORY_BUSY_PERCENT` | `80` | Memory in use at which starts go one at a time |
+| `SANDBOX_MEMORY_FULL_PERCENT` | `92` | Memory in use at which starts wait |
+| `SANDBOX_MAX_PARALLEL_COMPUTER_STARTS` | `4` | Starts at once while memory is calm. `0` for no cap |
+| `SANDBOX_MEMORY_WAIT_MS` | `120000` | How long a start may wait for memory |
+
+Reclaimable cache counts as free. On Linux, including Docker Desktop's VM, the supervisor also reads
+memory stalls from `/proc/pressure/memory`; on a Mac running the supervisor directly it uses the
+kernel's own pressure level.
+
 ## Restricted computer egress
 
 Restricted egress gives Docker computers the public internet (browsing, DNS, apt, git

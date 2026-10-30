@@ -63,6 +63,11 @@ import {
 } from "./computer-spec.js";
 import { EgressNotEnforced, verifyRestrictedEgress } from "./egress-probe.js";
 import { assertComputerHomeWritable } from "./home-ownership.js";
+import {
+  MemoryPressureGate,
+  MemoryPressureTimeout,
+  resolveMemoryPressureSettings,
+} from "./memory-pressure.js";
 import type { ScreenAssignment } from "./supervisor-logic.js";
 import {
   assertRequestIdentity,
@@ -178,6 +183,13 @@ const limitSupervisorRequestBody: MiddlewareHandler = async (c, next) => {
     onError: (context) => context.json({ error: "Request body is too large." }, 413),
   })(c, next);
 };
+
+// Starts queue behind memory pressure so a burst of bots cannot push the host into swap.
+const memoryGate = new MemoryPressureGate(
+  resolveMemoryPressureSettings(),
+  undefined,
+  (level, sample) => getLogger().info("computer start memory pressure", { level, ...sample }),
+);
 
 const app = new Hono();
 
@@ -305,7 +317,14 @@ app.post("/computers", async (c) => {
             (await reconnectBotComputer(existing, body.botId, networkOwner, Boolean(endpoint))))
         ) {
           const started = !info.State.Running;
-          if (started) await existing.start();
+          if (started) {
+            const release = await memoryGate.admit(c.req.raw.signal);
+            try {
+              await existing.start();
+            } finally {
+              release();
+            }
+          }
           return c.json({
             id: existing.id,
             image: COMPUTER_IMAGE,
@@ -350,7 +369,9 @@ app.post("/computers", async (c) => {
             ? undefined
             : await ensureBotNetwork(body.botId, networkOwner);
         let container: Docker.Container | undefined;
+        let releaseStart: (() => void) | undefined;
         try {
+          releaseStart = await memoryGate.admit(c.req.raw.signal);
           if (existing) {
             await withComputerScreenLock(existing.id, async () => {
               await existing.remove({ force: true }).catch(() => undefined);
@@ -379,6 +400,8 @@ app.post("/computers", async (c) => {
           await container?.remove().catch(() => undefined);
           await createdNetwork?.remove().catch(() => undefined);
           throw error;
+        } finally {
+          releaseStart?.();
         }
         return c.json({
           id: container.id,
@@ -394,7 +417,7 @@ app.post("/computers", async (c) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ error: message }, 500);
+    return c.json({ error: message }, error instanceof MemoryPressureTimeout ? 503 : 500);
   }
 });
 
